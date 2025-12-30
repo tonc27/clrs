@@ -358,6 +358,48 @@
             <div id="probeList" class="probeListBox small"></div>
         </label>
 
+        <hr />
+        <div>
+          <div class="inline" style="align-items:center;">
+            <label class="inline" style="margin: 6px 0;">
+              <input id="showPca" type="checkbox" />
+              <span>PCA: show trajectory of GNN hidden states</span>
+            </label>
+          </div>
+          <div class="inline">
+            <label style="flex:1; min-width: 130px;">
+              PC for X-axis (1-based):
+              <input id="pcx" type="number" value="1" min="1" style="width:88px;" />
+            </label>
+            <label style="flex:1; min-width: 130px;">
+              PC for Y-axis (1-based):
+              <input id="pcy" type="number" value="2" min="1" style="width:88px;" />
+            </label>
+          </div>
+          <div class="small" id="pcaInfo" style="color:var(--muted);"></div>
+        </div>
+
+        <!-- Node-wise PCA panel -->
+        <div>
+          <div class="inline" style="align-items:center;">
+            <label class="inline" style="margin: 6px 0;">
+              <input id="showPcaNodes" type="checkbox" />
+              <span>PCA: nodes at current time (basis from all times)</span>
+            </label>
+          </div>
+          <div class="inline">
+            <label style="flex:1; min-width: 130px;">
+              PC for X-axis (1-based):
+              <input id="pcxNodes" type="number" value="1" min="1" style="width:88px;" />
+            </label>
+            <label style="flex:1; min-width: 130px;">
+              PC for Y-axis (1-based):
+              <input id="pcyNodes" type="number" value="2" min="1" style="width:88px;" />
+            </label>
+          </div>
+          <div class="small" id="pcaNodesInfo" style="color:var(--muted);"></div>
+        </div>
+
         <div class="hoverPanel">
             <div class="hoverTitle">Hover value</div>
             <div id="hoverText" class="hoverText mono">Hover any cell to see its value here.</div>
@@ -373,9 +415,18 @@
         </div>
 
         <div id="cardsContainer" class="cards"></div>
+        <div id="pcaContainer" style="margin-top:16px; display:none;">
+          <div class="small mono" id="pcaTitle" style="margin:6px 2px;">PCA trajectory</div>
+          <canvas id="pcaCanvas" style="width:100%; height:320px; border:1px solid var(--border); border-radius:8px; background:#fff;"></canvas>
+        </div>
+        <div id="pcaNodesContainer" style="margin-top:16px; display:none;">
+          <div class="small mono" id="pcaNodesTitle" style="margin:6px 2px;">PCA (nodes at current time)</div>
+          <canvas id="pcaNodesCanvas" style="width:100%; height:320px; border:1px solid var(--border); border-radius:8px; background:#fff;"></canvas>
+        </div>
     </div>
 </div>
 
+<script src="pca.js"></script>
 <script>
     (() => {
       const elFile = document.getElementById('file');
@@ -398,6 +449,23 @@
       const elSummary = document.getElementById('summary');
       const elHoverText = document.getElementById('hoverText');
 
+      // PCA controls
+      const elShowPca = document.getElementById('showPca');
+      const elPcx = document.getElementById('pcx');
+      const elPcy = document.getElementById('pcy');
+      const elPcaInfo = document.getElementById('pcaInfo');
+      const elPcaContainer = document.getElementById('pcaContainer');
+      const elPcaCanvas = document.getElementById('pcaCanvas');
+      const elPcaTitle = document.getElementById('pcaTitle');
+      // Node-wise PCA controls
+      const elShowPcaNodes = document.getElementById('showPcaNodes');
+      const elPcxNodes = document.getElementById('pcxNodes');
+      const elPcyNodes = document.getElementById('pcyNodes');
+      const elPcaNodesInfo = document.getElementById('pcaNodesInfo');
+      const elPcaNodesContainer = document.getElementById('pcaNodesContainer');
+      const elPcaNodesCanvas = document.getElementById('pcaNodesCanvas');
+      const elPcaNodesTitle = document.getElementById('pcaNodesTitle');
+
       const btnPlay = document.getElementById('play');
       const btnPause = document.getElementById('pause');
       const btnAll = document.getElementById('all');
@@ -411,6 +479,8 @@
 
       const selectedState = new Map();
       const scaleCache = new Map();
+      // Cache for node-wise PCA basis so we don't recompute when scrubbing time
+      const nodePcaCache = { key: null, pca: null };
 
       // Fixed categorical palette (muted, readable)
       const CAT_PALETTE = [
@@ -463,8 +533,8 @@
       function isCategoricalType(typeStr) {
         if (!typeStr) return false;
         const s = String(typeStr).toLowerCase();
-        // Only true categoricals should be rendered with the palette.
-        return s.includes('categorical');
+        // Treat MASK_ONE like categorical for rendering ([B,T,N,K] with K classes)
+        return s.includes('categorical') || s.includes('mask_one');
       }
 
 
@@ -522,7 +592,7 @@
         }
         if (dims.length === 3) {
           const [d0,d1,d2]=dims;
-          if ((d1>1 && d2>1) && (d1===d2 || (L==null && d0>1 && d1>1))) throw new Error('matrix-like');
+          // Do NOT early-classify as matrix just because T==N; rely on metadata/heuristics below.
 
           if (L!=null) {
             if (d0===L) {
@@ -1108,6 +1178,23 @@
 
           let T=null, B=null;
           const dimsTrue = getDims(p.true);
+          const typeStr = String(p.type || '').toUpperCase();
+          const locStr = String(p.location || '').toUpperCase();
+          const axes = Array.isArray(p.axes) ? p.axes : Array.isArray(p.true?.axes) ? p.true.axes : null;
+
+          // Helper: decide vector vs matrix based on metadata when available
+          function preferVectorByMetadata(){
+            // If location=NODE and not EDGE, prefer vector (per-node quantities)
+            if (locStr === 'NODE') return true;
+            // If axes has exactly one 'N' after B,T → vector; two 'N' → matrix
+            if (Array.isArray(axes)){
+              const nCount = axes.reduce((a,x)=>a + (String(x).toUpperCase()==='N'), 0);
+              if (nCount === 1) return true;
+            }
+            // MASK_ONE typically denotes a one-hot over nodes; treat as vector unless explicitly EDGE
+            if (typeStr === 'MASK_ONE' && locStr !== 'EDGE') return true;
+            return false;
+          }
 
           // categorical vector: [B,T,N,K]
           if (isCategoricalType(p.type) && dimsTrue.length === 4 && dimsTrue[3] <= 64) {
@@ -1117,16 +1204,33 @@
               T = cv.T; B = cv.B;
             } catch(_) {}
           } else {
-            try {
-              const v = makeTimeVectorViewWithLengths(p.true, lengths);
-              vectorNames.push(name);
-              T=v.T; B=v.B;
-            } catch(_) {
-              matrixNames.push(name);
+            const forceVector = preferVectorByMetadata();
+            if (forceVector) {
               try {
-                const m = makeTimeMatrixViewWithLengths(p.true, lengths);
-                T=m.T; B=m.B;
-              } catch(_) {}
+                const v = makeTimeVectorViewWithLengths(p.true, lengths);
+                vectorNames.push(name);
+                T=v.T; B=v.B;
+              } catch(_) {
+                // If vector view fails, fall back to matrix
+                try {
+                  const m = makeTimeMatrixViewWithLengths(p.true, lengths);
+                  matrixNames.push(name);
+                  T=m.T; B=m.B;
+                } catch(_) {}
+              }
+            } else {
+              // default: try vector first, else matrix (existing heuristic)
+              try {
+                const v = makeTimeVectorViewWithLengths(p.true, lengths);
+                vectorNames.push(name);
+                T=v.T; B=v.B;
+              } catch(_) {
+                matrixNames.push(name);
+                try {
+                  const m = makeTimeMatrixViewWithLengths(p.true, lengths);
+                  T=m.T; B=m.B;
+                } catch(_) {}
+              }
             }
           }
 
@@ -1458,6 +1562,10 @@
         }
 
         elSummary.textContent = `selected=${selectedNames.length} • vectors=${vectorNames.length} • matrices=${matrixNames.length}`;
+
+        // Update PCA rendering after probes render and UI updates
+        renderPCA();
+        renderPCANodes();
         if (tCapFromIsLast != null) {
           elMeta.textContent = `Using per-batch time from is_last: T_valid=${tCapFromIsLast} (batch ${bIdx}).`;
         } else if (tCapFromLengths != null) {
@@ -1467,14 +1575,136 @@
         }
       }
 
+      // PCA rendering
+      function renderPCA(){
+        try {
+          const hs = algo && algo.gnn_hidden_states && algo.gnn_hidden_states.data;
+          const hasHS = Array.isArray(hs);
+          elShowPca.disabled = !hasHS;
+          if (!elShowPca.checked || !hasHS){
+            elPcaContainer.style.display = 'none';
+            elPcaInfo.textContent = hasHS ? 'PCA is available. Enable the checkbox to view.' : 'Hidden states not found in JSON.';
+            return;
+          }
+
+          const bIdx = Math.max(0, Number(elBidx.value) || 0);
+          // Determine valid T for this batch using is_last or lengths
+          let Tvalid = validTFromIsLast(bIdx);
+          if (Tvalid == null) {
+            const Ls = Array.isArray(algo?.lengths) ? algo.lengths : null;
+            if (Ls && Ls.length > bIdx) {
+              const L = Number(Ls[bIdx]);
+              if (Number.isFinite(L) && L > 0) Tvalid = L;
+            }
+          }
+          // Fallback to full T
+          if (Tvalid == null) {
+            try { Tvalid = hs[Math.min(bIdx, hs.length-1)].length; } catch(_) { Tvalid = 1; }
+          }
+
+          const tVectors = PCA.flattenBTNDToTimeVectors(hs, bIdx, Tvalid);
+          const T = tVectors.length;
+          if (T === 0){
+            elPcaContainer.style.display = 'none';
+            elPcaInfo.textContent = 'No timesteps to show.';
+            return;
+          }
+
+          const K = Math.min(10, T);
+          const pca = PCA.fit(tVectors, K);
+
+          const pcx = Math.max(1, Number(elPcx.value) || 1);
+          const pcy = Math.max(1, Number(elPcy.value) || 2);
+          const coords = PCA.projectXY(pca, pcx, pcy);
+
+          // Canvas setup
+          const dpr = window.devicePixelRatio || 1;
+          const cssW = elPcaCanvas.clientWidth || 600;
+          const cssH = elPcaCanvas.clientHeight || 320;
+          elPcaCanvas.width = Math.max(1, Math.floor(cssW * dpr));
+          elPcaCanvas.height = Math.max(1, Math.floor(cssH * dpr));
+          const ctx = elPcaCanvas.getContext('2d');
+          ctx.setTransform(dpr,0,0,dpr,0,0);
+          ctx.clearRect(0,0,cssW,cssH);
+
+          // Compute bounds with padding
+          let xmin=Infinity,xmax=-Infinity,ymin=Infinity,ymax=-Infinity;
+          for (const p of coords){
+            if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+            if (p.x < xmin) xmin = p.x; if (p.x > xmax) xmax = p.x;
+            if (p.y < ymin) ymin = p.y; if (p.y > ymax) ymax = p.y;
+          }
+          if (!Number.isFinite(xmin) || !Number.isFinite(ymin)){
+            elPcaContainer.style.display = 'none';
+            elPcaInfo.textContent = 'PCA produced invalid coordinates.';
+            return;
+          }
+          if (xmax === xmin) { xmax = xmin + 1e-6; }
+          if (ymax === ymin) { ymax = ymin + 1e-6; }
+          const padX = 0.08 * (xmax - xmin);
+          const padY = 0.12 * (ymax - ymin);
+          xmin -= padX; xmax += padX; ymin -= padY; ymax += padY;
+
+          function sx(x){ return (x - xmin) / (xmax - xmin) * (cssW - 24) + 12; }
+          function sy(y){ return (1 - (y - ymin) / (ymax - ymin)) * (cssH - 24) + 12; }
+
+          // Axes
+          ctx.strokeStyle = '#ddd';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(10.5, 10.5, cssW-21, cssH-21);
+
+          // Trajectory lines
+          ctx.strokeStyle = '#4E79A7';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          let started=false;
+          for (let i=0;i<coords.length;i++){
+            const p = coords[i];
+            const X = sx(p.x), Y = sy(p.y);
+            if (!started){ ctx.moveTo(X,Y); started=true; }
+            else ctx.lineTo(X,Y);
+          }
+          ctx.stroke();
+
+          // Points
+          const curT = Math.max(0, Math.min(T-1, Number(elT.value) || 0));
+          for (let i=0;i<coords.length;i++){
+            const p = coords[i];
+            const X = sx(p.x), Y = sy(p.y);
+            ctx.beginPath();
+            ctx.arc(X, Y, (i===0 || i===T-1) ? 4 : 3, 0, Math.PI*2);
+            if (i === curT) {
+              ctx.fillStyle = '#E15759';
+              ctx.fill();
+            } else {
+              ctx.fillStyle = (i===0) ? '#59A14F' : (i===T-1 ? '#B07AA1' : '#4E79A7');
+              ctx.fill();
+            }
+          }
+
+          elPcaContainer.style.display = '';
+          const evx = pca.explained[Math.max(0, Math.min(pca.explained.length-1, pcx-1))] || 0;
+          const evy = pca.explained[Math.max(0, Math.min(pca.explained.length-1, pcy-1))] || 0;
+          elPcaInfo.textContent = `T=${T}, PCs available=${pca.K}. Var[X]=${(evx*100).toFixed(1)}%, Var[Y]=${(evy*100).toFixed(1)}%`;
+          elPcaTitle.textContent = `PCA trajectory • PC${pcx} vs PC${pcy}`;
+        } catch (e){
+          elPcaContainer.style.display = 'none';
+          elPcaInfo.textContent = `PCA error: ${e?.message || e}`;
+        }
+      }
+
       // events
       btnPlay.addEventListener('click', play);
       btnPause.addEventListener('click', stop);
       btnAll.addEventListener('click', ()=>setAllProbes(true));
       btnNone.addEventListener('click', ()=>setAllProbes(false));
 
-      elT.addEventListener('input', detectAndRender);
+      elT.addEventListener('input', () => { detectAndRender(); });
       elBidx.addEventListener('change', () => { stop(); scaleCache.clear(); detectAndRender(); });
+      // PCA controls events
+      elShowPca.addEventListener('change', renderPCA);
+      elPcx.addEventListener('input', renderPCA);
+      elPcy.addEventListener('input', renderPCA);
 
       elVCell.addEventListener('change', detectAndRender);
       elMCell.addEventListener('change', detectAndRender);
@@ -1515,7 +1745,323 @@
         detectAndRender();
       });
 
+
+      // Node-wise PCA rendering (unconnected set of N node points at current time)
+      function renderPCANodes(){
+        try {
+          const hs = algo && algo.gnn_hidden_states && algo.gnn_hidden_states.data;
+          const hasHS = Array.isArray(hs);
+          // Enable/disable UI
+          if (!hasHS){
+            elShowPcaNodes.disabled = true;
+            elPcaNodesContainer.style.display = 'none';
+            elPcaNodesInfo.textContent = 'Hidden states not found in JSON.';
+            return;
+          } else {
+            elShowPcaNodes.disabled = false;
+          }
+          if (!elShowPcaNodes.checked){
+            elPcaNodesContainer.style.display = 'none';
+            return;
+          }
+
+          const bIdx = Math.max(0, Number(elBidx.value) || 0);
+          // Determine valid T for this batch using is_last or lengths
+          let Tvalid = validTFromIsLast(bIdx);
+          if (Tvalid == null) {
+            const Ls = Array.isArray(algo?.lengths) ? algo.lengths : null;
+            if (Ls && Ls.length > bIdx) {
+              const L = Number(Ls[bIdx]);
+              if (Number.isFinite(L) && L > 0) Tvalid = L;
+            }
+          }
+          // Fallback to full T
+          if (Tvalid == null) {
+            try { Tvalid = hs[Math.min(bIdx, hs.length-1)].length; } catch(_) { Tvalid = 1; }
+          }
+
+          // Infer N and D
+          const bt = hs[Math.min(bIdx, hs.length-1)] || [];
+          const first = bt[0] || [];
+          const N = Array.isArray(first) ? first.length : 0;
+          const firstND = (N>0) ? first[0] : [];
+          const D = Array.isArray(firstND) ? firstND.length : 1;
+
+          // Build cache key and (re)fit PCA basis if needed — basis over ALL nodes across ALL valid timesteps
+          const algoName = algo && algo.algorithm ? String(algo.algorithm) : 'algo';
+          const cacheKey = `${algoName}|b=${bIdx}|T=${Tvalid}|N=${N}|D=${D}`;
+          if (nodePcaCache.key !== cacheKey){
+            let samples;
+            try {
+              samples = PCA.flattenBTNDToNodeSamples(hs, bIdx, Tvalid);
+            } catch(e){
+              elPcaNodesContainer.style.display = 'none';
+              elPcaNodesInfo.textContent = 'Failed to build node samples for PCA.';
+              return;
+            }
+            const K = Math.min(10, Math.min(D, samples.length));
+            try {
+              nodePcaCache.pca = PCA.fit(samples, K);
+              nodePcaCache.key = cacheKey;
+            } catch(e){
+              elPcaNodesContainer.style.display = 'none';
+              elPcaNodesInfo.textContent = 'PCA fitting failed.';
+              return;
+            }
+          }
+
+          const pca = nodePcaCache.pca;
+          if (!pca){
+            elPcaNodesContainer.style.display = 'none';
+            elPcaNodesInfo.textContent = 'PCA basis not available.';
+            return;
+          }
+
+          // Collect vectors for the CURRENT time (N x D)
+          const curT = Math.max(0, Math.min((Tvalid||1)-1, Number(elT.value) || 0));
+          const nodes = (bt && bt[curT]) ? bt[curT] : [];
+          const vectors = new Array(N);
+          for (let n=0;n<N;n++){
+            const h = nodes[n] || [];
+            const row = new Float64Array(D);
+            if (Array.isArray(h)){
+              for (let d=0; d<D; d++) row[d] = Number(h[d]) || 0;
+            } else {
+              row[0] = Number(h) || 0;
+            }
+            vectors[n] = row;
+          }
+
+          const pcx = Math.max(1, Number(elPcxNodes.value) || 1);
+          const pcy = Math.max(1, Number(elPcyNodes.value) || 2);
+          const pts = PCA.projectPointsXY(pca, vectors, pcx, pcy);
+
+          // Canvas setup
+          const dpr = window.devicePixelRatio || 1;
+          const cssW = elPcaNodesCanvas.clientWidth || 600;
+          const cssH = elPcaNodesCanvas.clientHeight || 320;
+          elPcaNodesCanvas.width = Math.max(1, Math.floor(cssW * dpr));
+          elPcaNodesCanvas.height = Math.max(1, Math.floor(cssH * dpr));
+          const ctx = elPcaNodesCanvas.getContext('2d');
+          ctx.setTransform(dpr,0,0,dpr,0,0);
+          ctx.clearRect(0,0,cssW,cssH);
+
+          // Bounds
+          let xmin=Infinity,xmax=-Infinity,ymin=Infinity,ymax=-Infinity;
+          for (const p of pts){
+            if (!p) continue;
+            if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+            if (p.x < xmin) xmin = p.x; if (p.x > xmax) xmax = p.x;
+            if (p.y < ymin) ymin = p.y; if (p.y > ymax) ymax = p.y;
+          }
+          if (!Number.isFinite(xmin) || !Number.isFinite(ymin)){
+            elPcaNodesContainer.style.display = 'none';
+            elPcaNodesInfo.textContent = 'PCA produced invalid coordinates for nodes.';
+            return;
+          }
+          if (xmax === xmin) { xmax = xmin + 1e-6; }
+          if (ymax === ymin) { ymax = ymin + 1e-6; }
+          const padX = 0.08 * (xmax - xmin);
+          const padY = 0.12 * (ymax - ymin);
+          xmin -= padX; xmax += padX; ymin -= padY; ymax += padY;
+          function sx(x){ return (x - xmin) / (xmax - xmin) * (cssW - 24) + 12; }
+          function sy(y){ return (1 - (y - ymin) / (ymax - ymin)) * (cssH - 24) + 12; }
+
+          // Axes box
+          ctx.strokeStyle = '#ddd';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(10.5, 10.5, cssW-21, cssH-21);
+
+          // Points (unconnected)
+          ctx.fillStyle = '#4E79A7';
+          for (let i=0;i<pts.length;i++){
+            const p = pts[i];
+            const X = sx(p.x), Y = sy(p.y);
+            ctx.beginPath();
+            ctx.arc(X, Y, 3, 0, Math.PI*2);
+            ctx.fill();
+          }
+
+          elPcaNodesContainer.style.display = '';
+          const evx = pca.explained[Math.max(0, Math.min(pca.explained.length-1, pcx-1))] || 0;
+          const evy = pca.explained[Math.max(0, Math.min(pca.explained.length-1, pcy-1))] || 0;
+          elPcaNodesInfo.textContent = `N=${N}, T_basis=${Tvalid}, PCs available=${pca.K}. Var[X]=${(evx*100).toFixed(1)}%, Var[Y]=${(evy*100).toFixed(1)}%`;
+        } catch (e){
+          elPcaNodesContainer.style.display = 'none';
+          elPcaNodesInfo.textContent = 'Error rendering node-wise PCA.';
+        }
+      }
+
+      // Event listeners for node-wise PCA controls
+      if (typeof elShowPcaNodes !== 'undefined'){
+        elShowPcaNodes.addEventListener('change', ()=>{ renderPCANodes(); });
+      }
+      if (typeof elPcxNodes !== 'undefined'){
+        elPcxNodes.addEventListener('input', ()=>{ renderPCANodes(); });
+      }
+      if (typeof elPcyNodes !== 'undefined'){
+        elPcyNodes.addEventListener('input', ()=>{ renderPCANodes(); });
+      }
+
     })();
+
+      // Node-wise PCA rendering (unconnected set of N node points at current time)
+      function renderPCANodes(){
+        try {
+          const hs = algo && algo.gnn_hidden_states && algo.gnn_hidden_states.data;
+          const hasHS = Array.isArray(hs);
+          // Enable/disable UI
+          if (!hasHS){
+            elShowPcaNodes.disabled = true;
+            elPcaNodesContainer.style.display = 'none';
+            elPcaNodesInfo.textContent = 'Hidden states not found in JSON.';
+            return;
+          } else {
+            elShowPcaNodes.disabled = false;
+          }
+          if (!elShowPcaNodes.checked){
+            elPcaNodesContainer.style.display = 'none';
+            return;
+          }
+
+          const bIdx = Math.max(0, Number(elBidx.value) || 0);
+          // Determine valid T for this batch using is_last or lengths
+          let Tvalid = validTFromIsLast(bIdx);
+          if (Tvalid == null) {
+            const Ls = Array.isArray(algo?.lengths) ? algo.lengths : null;
+            if (Ls && Ls.length > bIdx) {
+              const L = Number(Ls[bIdx]);
+              if (Number.isFinite(L) && L > 0) Tvalid = L;
+            }
+          }
+          // Fallback to full T
+          if (Tvalid == null) {
+            try { Tvalid = hs[Math.min(bIdx, hs.length-1)].length; } catch(_) { Tvalid = 1; }
+          }
+
+          // Infer N and D
+          const bt = hs[Math.min(bIdx, hs.length-1)] || [];
+          const first = bt[0] || [];
+          const N = Array.isArray(first) ? first.length : 0;
+          const firstND = (N>0) ? first[0] : [];
+          const D = Array.isArray(firstND) ? firstND.length : 1;
+
+          // Build cache key and (re)fit PCA basis if needed — basis over ALL nodes across ALL valid timesteps
+          const algoName = algo && algo.algorithm ? String(algo.algorithm) : 'algo';
+          const cacheKey = `${algoName}|b=${bIdx}|T=${Tvalid}|N=${N}|D=${D}`;
+          if (nodePcaCache.key !== cacheKey){
+            let samples;
+            try {
+              samples = PCA.flattenBTNDToNodeSamples(hs, bIdx, Tvalid);
+            } catch(e){
+              elPcaNodesContainer.style.display = 'none';
+              elPcaNodesInfo.textContent = 'Failed to build node samples for PCA.';
+              return;
+            }
+            const K = Math.min(10, Math.min(D, samples.length));
+            try {
+              nodePcaCache.pca = PCA.fit(samples, K);
+              nodePcaCache.key = cacheKey;
+            } catch(e){
+              elPcaNodesContainer.style.display = 'none';
+              elPcaNodesInfo.textContent = 'PCA fitting failed.';
+              return;
+            }
+          }
+
+          const pca = nodePcaCache.pca;
+          if (!pca){
+            elPcaNodesContainer.style.display = 'none';
+            elPcaNodesInfo.textContent = 'PCA basis not available.';
+            return;
+          }
+
+          // Collect vectors for the CURRENT time (N x D)
+          const curT = Math.max(0, Math.min((Tvalid||1)-1, Number(elT.value) || 0));
+          const nodes = (bt && bt[curT]) ? bt[curT] : [];
+          const vectors = new Array(N);
+          for (let n=0;n<N;n++){
+            const h = nodes[n] || [];
+            const row = new Float64Array(D);
+            if (Array.isArray(h)){
+              for (let d=0; d<D; d++) row[d] = Number(h[d]) || 0;
+            } else {
+              row[0] = Number(h) || 0;
+            }
+            vectors[n] = row;
+          }
+
+          const pcx = Math.max(1, Number(elPcxNodes.value) || 1);
+          const pcy = Math.max(1, Number(elPcyNodes.value) || 2);
+          const pts = PCA.projectPointsXY(pca, vectors, pcx, pcy);
+
+          // Canvas setup
+          const dpr = window.devicePixelRatio || 1;
+          const cssW = elPcaNodesCanvas.clientWidth || 600;
+          const cssH = elPcaNodesCanvas.clientHeight || 320;
+          elPcaNodesCanvas.width = Math.max(1, Math.floor(cssW * dpr));
+          elPcaNodesCanvas.height = Math.max(1, Math.floor(cssH * dpr));
+          const ctx = elPcaNodesCanvas.getContext('2d');
+          ctx.setTransform(dpr,0,0,dpr,0,0);
+          ctx.clearRect(0,0,cssW,cssH);
+
+          // Bounds
+          let xmin=Infinity,xmax=-Infinity,ymin=Infinity,ymax=-Infinity;
+          for (const p of pts){
+            if (!p) continue;
+            if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+            if (p.x < xmin) xmin = p.x; if (p.x > xmax) xmax = p.x;
+            if (p.y < ymin) ymin = p.y; if (p.y > ymax) ymax = p.y;
+          }
+          if (!Number.isFinite(xmin) || !Number.isFinite(ymin)){
+            elPcaNodesContainer.style.display = 'none';
+            elPcaNodesInfo.textContent = 'PCA produced invalid coordinates for nodes.';
+            return;
+          }
+          if (xmax === xmin) { xmax = xmin + 1e-6; }
+          if (ymax === ymin) { ymax = ymin + 1e-6; }
+          const padX = 0.08 * (xmax - xmin);
+          const padY = 0.12 * (ymax - ymin);
+          xmin -= padX; xmax += padX; ymin -= padY; ymax += padY;
+          function sx(x){ return (x - xmin) / (xmax - xmin) * (cssW - 24) + 12; }
+          function sy(y){ return (1 - (y - ymin) / (ymax - ymin)) * (cssH - 24) + 12; }
+
+          // Axes box
+          ctx.strokeStyle = '#ddd';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(10.5, 10.5, cssW-21, cssH-21);
+
+          // Points (unconnected)
+          ctx.fillStyle = '#4E79A7';
+          for (let i=0;i<pts.length;i++){
+            const p = pts[i];
+            const X = sx(p.x), Y = sy(p.y);
+            ctx.beginPath();
+            ctx.arc(X, Y, 3, 0, Math.PI*2);
+            ctx.fill();
+          }
+
+          elPcaNodesContainer.style.display = '';
+          const evx = pca.explained[Math.max(0, Math.min(pca.explained.length-1, pcx-1))] || 0;
+          const evy = pca.explained[Math.max(0, Math.min(pca.explained.length-1, pcy-1))] || 0;
+          elPcaNodesInfo.textContent = `N=${N}, T_basis=${Tvalid}, PCs available=${pca.K}. Var[X]=${(evx*100).toFixed(1)}%, Var[Y]=${(evy*100).toFixed(1)}%`;
+        } catch (e){
+          elPcaNodesContainer.style.display = 'none';
+          elPcaNodesInfo.textContent = 'Error rendering node-wise PCA.';
+        }
+      }
+
+      // Event listeners for node-wise PCA controls
+      if (typeof elShowPcaNodes !== 'undefined'){
+        elShowPcaNodes.addEventListener('change', ()=>{ renderPCANodes(); });
+      }
+      if (typeof elPcxNodes !== 'undefined'){
+        elPcxNodes.addEventListener('input', ()=>{ renderPCANodes(); });
+      }
+      if (typeof elPcyNodes !== 'undefined'){
+        elPcyNodes.addEventListener('input', ()=>{ renderPCANodes(); });
+      }
 </script>
 </body>
 </html>
+

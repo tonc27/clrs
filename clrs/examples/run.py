@@ -32,6 +32,9 @@ import tensorflow as tf
 flags.DEFINE_enum('mode', 'train', ['train', 'test'],
                   'Whether to train the model or only test a saved model.')
 
+flags.DEFINE_boolean('quantize', True,
+                     'If True (default), round floats to 9 decimals in exported JSON.\n'
+                     'Pass --quantize=False to keep original precision.')
 
 flags.DEFINE_list('algorithms', ['bfs'], 'Which algorithms to run.')
 flags.DEFINE_list('train_lengths', ['4', '7', '11', '13', '16'],
@@ -587,7 +590,6 @@ def main(unused_argv):
       eval_model.init(init_features, FLAGS.seed + 1)
       eval_model.restore_model('best.pkl', only_load_processor=False)
 
-
       for algo_idx in range(len(train_samplers)):
         common_extras = {'examples_seen': current_train_items[algo_idx],
                          'step': step,
@@ -595,11 +597,13 @@ def main(unused_argv):
 
         new_rng_key, rng_key = jax.random.split(rng_key)
 
-        from clrs._src.probe_utils import extract_all_probes, save_algo_to_json
+        from clrs._src.probe_utils import extract_all_probes, save_algo_to_json, quantize_floats_in_obj
 
         test_sample = next(test_samplers[algo_idx])
 
-        outputs, hint_preds = eval_model.predict(
+        prev_debug = getattr(eval_model, 'debug', False)
+        eval_model.debug = True
+        outputs, hint_preds, hidden_states = eval_model.predict(
             new_rng_key,
             test_sample.features,
             algorithm_index=algo_idx,
@@ -607,16 +611,24 @@ def main(unused_argv):
             return_all_outputs=False,
         )
 
+        eval_model.debug = prev_debug
+
         algo_name = FLAGS.algorithms[algo_idx]
 
-        algo_data = extract_all_probes(hint_preds, test_sample)
+        algo_data = extract_all_probes(hint_preds, test_sample, hidden_states=hidden_states)
 
         algo_data["algorithm"] = algo_name
+
+        if FLAGS.quantize:
+          try:
+            algo_data = quantize_floats_in_obj(algo_data, decimals=9)
+          except Exception as e:
+            logging.warning('Quantization fail: %s', e)
 
         out_path = f"extracted/{algo_name}.json"
         save_algo_to_json(out_path, algo_data)
 
-        logging.info("Saved %s with all ground-truth and predicted probes.", out_path)
+        logging.info("Saved %s with all ground-truth and predicted probes and GNN states.", out_path)
 
         test_stats = collect_and_eval(
             test_samplers[algo_idx],

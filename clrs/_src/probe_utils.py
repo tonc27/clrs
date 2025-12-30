@@ -274,18 +274,43 @@ def extract_probe(
   while truth_bt.ndim > 2 and truth_bt.shape[-1] == 1:
     truth_bt = truth_bt.squeeze(axis=-1)
 
-  # Axes metadata
+  # Axes metadata (use type and location to choose semantic axes)
   axes: List[str] = ["B", "T"]
-  if truth_bt.ndim == 3:
-    axes += ["N"]
-  elif truth_bt.ndim == 4:
-    # If POINTER, it's commonly [B,T,N,N]; label it explicitly
-    if ttype == specs.Type.POINTER:
+  rem_rank = max(0, truth_bt.ndim - 2)
+  loc = getattr(truth_dp, 'location', None)
+  try:
+    loc_enum = specs.Location(loc) if isinstance(loc, int) else loc
+  except Exception:
+    loc_enum = loc
+
+  if rem_rank == 0:
+    pass
+  elif ttype == specs.Type.POINTER:
+    # Commonly pointer over nodes: [B,T,N,N]
+    if rem_rank >= 2:
       axes += ["N", "N"]
     else:
-      axes += ["H", "W"]
+      axes += ["N"]
+  elif ttype in (specs.Type.MASK_ONE, specs.Type.CATEGORICAL):
+    if rem_rank == 1:
+      # Graph-level categorical over nodes/classes: [B,T,K]
+      axes += ["K"]
+    elif rem_rank == 2:
+      # Per-node categorical: [B,T,N,K]
+      axes += ["N", "K"]
+    elif rem_rank >= 3:
+      # Per-edge categorical: [B,T,N,N,K]
+      axes += ["N", "N", "K"]
+      # If there are more dims, append generics
+      for i in range(rem_rank - 3):
+        axes.append(f"D{i}")
   else:
-    axes += [f"D{i}" for i in range(truth_bt.ndim - 2)]
+    if rem_rank == 1:
+      axes += ["N"]
+    elif rem_rank == 2:
+      axes += ["H", "W"]
+    else:
+      axes += [f"D{i}" for i in range(rem_rank)]
 
   out: Dict[str, Any] = {
     "true": truth_bt.tolist(),
@@ -299,9 +324,9 @@ def extract_probe(
 
 
 def save_probe_to_json(path: str, probe_data: Dict[str, Any]) -> None:
-  """JSON-safe serialization."""
+  """JSON-safe serialization (compact, no pretty print)."""
   with open(path, "w", encoding="utf-8") as f:
-    json.dump(probe_data, f, ensure_ascii=False, indent=2)
+    json.dump(probe_data, f, ensure_ascii=False, separators=(",", ":"))
 
 
 def extract_all_probes(
@@ -310,6 +335,7 @@ def extract_all_probes(
     *,
     align_mode: str = "pad_from_truth_first",
     postprocess: str = "auto",
+    hidden_states: Any = None,
 ) -> Dict[str, Any]:
   """Extracts ALL probes present in `feedback` into a single structure.
 
@@ -357,11 +383,71 @@ def extract_all_probes(
       except Exception:
         t_name = str(t)
       entry["type"] = t_name
+      # Attach location info for the viewer (GRAPH/NODE/EDGE)
+      try:
+        l = dp.location
+        try:
+          l_name = specs.Location(l).name if isinstance(l, int) else l.name
+        except Exception:
+          l_name = str(l)
+        entry["location"] = l_name
+      except Exception:
+        pass
       probes[dp.name] = entry
     except Exception as e:
       probes[dp.name] = {"error": str(e)}
 
   out: Dict[str, Any] = {"algorithm": str(algo_name), "probes": probes}
+
+  # Optional: attach GNN hidden states captured in debug mode
+  if hidden_states is not None:
+    try:
+      hs = _to_numpy(hidden_states)
+      # Expecting [T, B, N, D] from nets.Net when debug=True; make it [B, T, N, D]
+      if hs.ndim >= 2 and hs.shape[0] != 0:
+        if hs.ndim >= 2:
+          # If time is leading, move it behind batch
+          # Common case: (T,B,N,D) -> (B,T,N,D)
+          if len(hs.shape) >= 2:
+            # Heuristic: if second dim equals batch size inferred from lengths
+            # or from feedback inputs, we assume shape is [T,B,...]
+            # Otherwise, if first dim equals batch, assume already [B,T,...]
+            inferred_B = None
+            try:
+              if lengths_list:
+                inferred_B = len(lengths_list)
+            except Exception:
+              inferred_B = None
+            if inferred_B is not None:
+              if hs.shape[1] == inferred_B and hs.shape[0] != inferred_B:
+                hs_btnd = np.moveaxis(hs, 0, 1)
+              elif hs.shape[0] == inferred_B:
+                hs_btnd = hs
+              else:
+                # Fallback to moving time to axis 1
+                hs_btnd = np.moveaxis(hs, 0, 1)
+            else:
+              # No batch info; prefer moving axis 0 to 1 as default
+              hs_btnd = np.moveaxis(hs, 0, 1)
+          else:
+            hs_btnd = hs
+        else:
+          hs_btnd = hs
+      else:
+        hs_btnd = hs
+
+      # Ensure rank is at least 4: [B,T,N,D]
+      while hs_btnd.ndim < 4:
+        hs_btnd = np.expand_dims(hs_btnd, axis=-1)
+
+      out["gnn_hidden_states"] = {
+        "data": hs_btnd.tolist(),
+        "axes": ["B", "T", "N", "D"],
+        "shape": list(hs_btnd.shape),
+      }
+    except Exception as e:
+      out["gnn_hidden_states"] = {"error": f"Failed to serialize hidden states: {e}"}
+
   if lengths_list:
     out["lengths"] = lengths_list
     # Best-effort per-batch termination flags for the viewer: is_last[b][t]
@@ -386,7 +472,45 @@ def extract_all_probes(
 
 def save_algo_to_json(path: str, algo_data: Dict[str, Any]) -> None:
   with open(path, "w", encoding="utf-8") as f:
-    json.dump(algo_data, f, ensure_ascii=False, indent=2)
+    json.dump(algo_data, f, ensure_ascii=False, separators=(",", ":"))
+
+
+def quantize_floats_in_obj(obj, decimals: int = 9):
+  """Recursively rounds floats to a fixed number of decimals in a JSON-ready tree.
+
+  - Rounds only Python floats and NumPy floating types.
+  - Leaves ints/strings/bools/None unchanged.
+  - Processes dicts, lists, and tuples recursively.
+  - Does not pad with trailing zeros; JSON default float repr is used.
+  """
+  try:
+    import numpy as _np  # local import to avoid hard dep
+    np_floating = _np.floating
+  except Exception:  # pragma: no cover
+    _np = None
+    class _Dummy: pass
+    np_floating = _Dummy
+
+  def _q(x):
+    try:
+      y = round(float(x), decimals)
+      # Avoid negative zero in JSON
+      if y == 0.0:
+        return 0.0
+      return y
+    except Exception:
+      return x
+
+  if isinstance(obj, float) or (_np is not None and isinstance(obj, np_floating)):
+    return _q(obj)
+  if isinstance(obj, list):
+    return [quantize_floats_in_obj(v, decimals) for v in obj]
+  if isinstance(obj, tuple):
+    return tuple(quantize_floats_in_obj(v, decimals) for v in obj)
+  if isinstance(obj, dict):
+    return {k: quantize_floats_in_obj(v, decimals) for k, v in obj.items()}
+  # Primitive or unknown type: return as-is
+  return obj
 
 
 __all__ = [
@@ -394,4 +518,5 @@ __all__ = [
   "extract_all_probes",
   "save_probe_to_json",
   "save_algo_to_json",
+  "quantize_floats_in_obj",
 ]
