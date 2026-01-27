@@ -95,54 +95,6 @@
             <div id="probeList" class="probeListBox small"></div>
         </label>
 
-        <hr />
-        <div>
-          <div class="inline" style="align-items:center;">
-            <label class="inline" style="margin: 6px 0;">
-              <input id="showPca" type="checkbox" />
-              <span>PCA: show trajectory of GNN hidden states</span>
-            </label>
-          </div>
-          <div class="inline">
-            <label style="flex:1; min-width: 130px;">
-              PC for X-axis (1-based):
-              <input id="pcx" type="number" value="1" min="1" style="width:88px;" />
-            </label>
-            <label style="flex:1; min-width: 130px;">
-              PC for Y-axis (1-based):
-              <input id="pcy" type="number" value="2" min="1" style="width:88px;" />
-            </label>
-          </div>
-          <div class="small" id="pcaInfo" style="color:var(--muted);"></div>
-        </div>
-
-        <!-- Node-wise PCA panel -->
-        <div>
-          <div class="inline" style="align-items:center;">
-            <label class="inline" style="margin: 6px 0;">
-              <input id="showPcaNodes" type="checkbox" />
-              <span>PCA: nodes at current time (basis from all times)</span>
-            </label>
-          </div>
-          <div class="inline" style="align-items:center;">
-            <label class="inline" style="margin: 6px 0;">
-              <input id="colorGraphNodes" type="checkbox" />
-              <span>Color graph nodes</span>
-            </label>
-          </div>
-          <div class="inline">
-            <label style="flex:1; min-width: 130px;">
-              PC for X-axis (1-based):
-              <input id="pcxNodes" type="number" value="1" min="1" style="width:88px;" />
-            </label>
-            <label style="flex:1; min-width: 130px;">
-              PC for Y-axis (1-based):
-              <input id="pcyNodes" type="number" value="2" min="1" style="width:88px;" />
-            </label>
-          </div>
-          <div class="small" id="pcaNodesInfo" style="color:var(--muted);"></div>
-        </div>
-
         <div class="hoverPanel">
             <div class="hoverTitle">Hover value</div>
             <div id="hoverText" class="hoverText mono">Hover any cell to see its value here.</div>
@@ -158,18 +110,9 @@
         </div>
 
         <div id="cardsContainer" class="cards"></div>
-        <div id="pcaContainer" style="margin-top:16px; display:none;">
-          <div class="small mono" id="pcaTitle" style="margin:6px 2px;">PCA trajectory</div>
-          <canvas id="pcaCanvas" style="width:100%; height:320px; border:1px solid var(--border); border-radius:8px; background:#fff;"></canvas>
-        </div>
-        <div id="pcaNodesContainer" style="margin-top:16px; display:none;">
-          <div class="small mono" id="pcaNodesTitle" style="margin:6px 2px;">PCA (nodes at current time)</div>
-          <canvas id="pcaNodesCanvas" style="width:100%; height:320px; border:1px solid var(--border); border-radius:8px; background:#fff;"></canvas>
-        </div>
     </div>
 </div>
 
-<script src="pca.js"></script>
 <script src="viewer.js"></script>
 </body>
 </html>

@@ -42,23 +42,26 @@
     const elSummary = document.getElementById('summary');
     const elHoverText = document.getElementById('hoverText');
 
-    // PCA controls
-    const elShowPca = document.getElementById('showPca');
-    const elPcx = document.getElementById('pcx');
-    const elPcy = document.getElementById('pcy');
-    const elPcaInfo = document.getElementById('pcaInfo');
-    const elPcaContainer = document.getElementById('pcaContainer');
-    const elPcaCanvas = document.getElementById('pcaCanvas');
-    const elPcaTitle = document.getElementById('pcaTitle');
-    // Node-wise PCA controls
-    const elShowPcaNodes = document.getElementById('showPcaNodes');
-    const elPcxNodes = document.getElementById('pcxNodes');
-    const elPcyNodes = document.getElementById('pcyNodes');
-    const elPcaNodesInfo = document.getElementById('pcaNodesInfo');
-    const elPcaNodesContainer = document.getElementById('pcaNodesContainer');
-    const elPcaNodesCanvas = document.getElementById('pcaNodesCanvas');
-    const elPcaNodesTitle = document.getElementById('pcaNodesTitle');
-    const elColorGraphNodes = document.getElementById('colorGraphNodes');
+    // --- PCA has been removed from the UI (viewer.html). Keep the viewer working by making PCA optional.
+    const HAS_PCA_UI = !!document.getElementById('showPca');
+
+    // PCA controls (optional)
+    const elShowPca = HAS_PCA_UI ? document.getElementById('showPca') : null;
+    const elPcx = HAS_PCA_UI ? document.getElementById('pcx') : null;
+    const elPcy = HAS_PCA_UI ? document.getElementById('pcy') : null;
+    const elPcaInfo = HAS_PCA_UI ? document.getElementById('pcaInfo') : null;
+    const elPcaContainer = HAS_PCA_UI ? document.getElementById('pcaContainer') : null;
+    const elPcaCanvas = HAS_PCA_UI ? document.getElementById('pcaCanvas') : null;
+    const elPcaTitle = HAS_PCA_UI ? document.getElementById('pcaTitle') : null;
+    // Node-wise PCA controls (optional)
+    const elShowPcaNodes = HAS_PCA_UI ? document.getElementById('showPcaNodes') : null;
+    const elPcxNodes = HAS_PCA_UI ? document.getElementById('pcxNodes') : null;
+    const elPcyNodes = HAS_PCA_UI ? document.getElementById('pcyNodes') : null;
+    const elPcaNodesInfo = HAS_PCA_UI ? document.getElementById('pcaNodesInfo') : null;
+    const elPcaNodesContainer = HAS_PCA_UI ? document.getElementById('pcaNodesContainer') : null;
+    const elPcaNodesCanvas = HAS_PCA_UI ? document.getElementById('pcaNodesCanvas') : null;
+    const elPcaNodesTitle = HAS_PCA_UI ? document.getElementById('pcaNodesTitle') : null;
+    const elColorGraphNodes = HAS_PCA_UI ? document.getElementById('colorGraphNodes') : null;
 
     const btnPlay = document.getElementById('play');
     const btnPause = document.getElementById('pause');
@@ -71,8 +74,12 @@
     const elCardsContainer = document.getElementById('cardsContainer');
 
     // Cache PCA plot bounds so axis range stays consistent across time (per batch/PC selection)
-    const pcaBoundsCache = { key: null, bounds: null };
-    const pcaNodesBoundsCache = { key: null, bounds: null };
+    const pcaBoundsCache = HAS_PCA_UI ? { key: null, bounds: null } : null;
+    const pcaNodesBoundsCache = HAS_PCA_UI ? { key: null, bounds: null } : null;
+
+    // Provide stubs so non-PCA flow can still call these safely.
+    const renderPCA = HAS_PCA_UI ? renderPCA_ : () => {};
+    const renderPcaNodes = HAS_PCA_UI ? renderPcaNodes_ : () => {};
 
     function computeBoundsFromPoints(points) {
       let xmin=Infinity,xmax=-Infinity,ymin=Infinity,ymax=-Infinity;
@@ -1475,9 +1482,9 @@
           drawCategoricalVector(card._cPred.getContext('2d'), card._cPred, labelsPred, vcell);
           drawVectorTo(card._cErr.getContext('2d'), card._cErr, mismatch, {bothIn01:true,min:0,max:1}, vcell, contrast);
 
-          card._cTrue._hoverGetter = ()=>({type:'vector',which:'true',t:tIdx,N,cell:vcell,get:(j)=>labelsTrue[j]});
-          card._cPred._hoverGetter = ()=>({type:'vector',which:'pred',t:tIdx,N,cell:vcell,get:(j)=>labelsPred[j]});
-          card._cErr._hoverGetter  = ()=>({type:'vector',which:'err', t:tIdx,N,cell:vcell,get:(j)=>mismatch[j]});
+          card._cTrue._hoverGetter = ()=>({type:'vector',which:'true',t:tIdx,N:1,cell:vcell,get:(j)=>labelsTrue[j]});
+          card._cPred._hoverGetter = ()=>({type:'vector',which:'pred',t:tIdx,N:1,cell:vcell,get:(j)=>labelsPred[j]});
+          card._cErr._hoverGetter  = ()=>({type:'vector',which:'err', t:tIdx,N:1,cell:vcell,get:(j)=>mismatch[j]});
 
           continue;
         }
@@ -1787,8 +1794,11 @@
 
       elSummary.textContent = `selected=${selectedNames.length} • vectors=${vectorNames.length} • matrices=${matrixNames.length}`;
 
-      renderPCA();
-      renderPCANodes();
+      // call PCA renders only if UI exists
+      if (HAS_PCA_UI) {
+        renderPCA();
+        renderPcaNodes();
+      }
       if (tCapFromIsLast != null) {
         elMeta.textContent = `Using per-batch time from is_last: T_valid=${tCapFromIsLast} (batch ${bIdx}).`;
       } else if (tCapFromLengths != null) {
@@ -1799,7 +1809,7 @@
     }
 
     // PCA rendering
-    function renderPCA(){
+    function renderPCA_(){
       try {
         const hs = algo && algo.gnn_hidden_states && algo.gnn_hidden_states.data;
         // Accept both nested JS arrays (from JSON) and typed-array-like objects.
@@ -1915,7 +1925,7 @@
       }
     }
 
-    function renderPCANodes(){
+    function renderPcaNodes_(){
       try {
         const hs = algo && algo.gnn_hidden_states && algo.gnn_hidden_states.data;
         const hasHS = Array.isArray(hs) || (hs && typeof hs === 'object' && typeof hs.length === 'number');
@@ -2098,14 +2108,19 @@
     elT.addEventListener('input', () => { detectAndRender(); });
     elBidx.addEventListener('change', () => { stop(); scaleCache.clear(); pcaBoundsCache.key=null; pcaBoundsCache.bounds=null; pcaNodesBoundsCache.key=null; pcaNodesBoundsCache.bounds=null; detectAndRender(); });
     // PCA controls events
-    elShowPca.addEventListener('change', () => { pcaBoundsCache.key=null; pcaBoundsCache.bounds=null; renderPCA(); });
-    elPcx.addEventListener('input', () => { pcaBoundsCache.key=null; pcaBoundsCache.bounds=null; renderPCA(); });
-    elPcy.addEventListener('input', () => { pcaBoundsCache.key=null; pcaBoundsCache.bounds=null; renderPCA(); });
+    if (HAS_PCA_UI) {
+      elShowPca.addEventListener('change', () => { detectAndRender(); });
+      elPcx.addEventListener('change', () => { pcaBoundsCache.key=null; pcaBoundsCache.bounds=null; detectAndRender(); });
+      elPcy.addEventListener('change', () => { pcaBoundsCache.key=null; pcaBoundsCache.bounds=null; detectAndRender(); });
 
-    elShowPcaNodes.addEventListener('change', () => { pcaNodesBoundsCache.key=null; pcaNodesBoundsCache.bounds=null; renderPCANodes(); });
-    elPcxNodes.addEventListener('input', () => { pcaNodesBoundsCache.key=null; pcaNodesBoundsCache.bounds=null; renderPCANodes(); });
-    elPcyNodes.addEventListener('input', () => { pcaNodesBoundsCache.key=null; pcaNodesBoundsCache.bounds=null; renderPCANodes(); });
-    elColorGraphNodes?.addEventListener('change', renderPCANodes);
+      elShowPcaNodes.addEventListener('change', () => { detectAndRender(); });
+      elPcxNodes.addEventListener('change', () => { pcaNodesBoundsCache.key=null; pcaNodesBoundsCache.bounds=null; detectAndRender(); });
+      elPcyNodes.addEventListener('change', () => { pcaNodesBoundsCache.key=null; pcaNodesBoundsCache.bounds=null; detectAndRender(); });
+
+      if (elColorGraphNodes) {
+        elColorGraphNodes.addEventListener('change', () => { detectAndRender(); });
+      }
+    }
 
     elVCell.addEventListener('change', detectAndRender);
     elMCell.addEventListener('change', detectAndRender);
@@ -2146,8 +2161,358 @@
       detectAndRender();
     });
 
-    // Make the module callable from elsewhere too
-    return { detectAndRender, stop, play };
+    // Rename original PCA rendering functions to avoid name conflicts with the stubs.
+    function renderPCA_() {
+      try {
+        const hs = algo && algo.gnn_hidden_states && algo.gnn_hidden_states.data;
+        // Accept both nested JS arrays (from JSON) and typed-array-like objects.
+        const hasHS = Array.isArray(hs) || (hs && typeof hs === 'object' && typeof hs.length === 'number');
+        elShowPca.disabled = !hasHS;
+        if (!elShowPca.checked || !hasHS){
+          elPcaContainer.style.display = 'none';
+          elPcaInfo.textContent = hasHS ? 'PCA is available. Enable the checkbox to view.' : 'Hidden states not found in JSON.';
+          return;
+        }
+
+        // Ensure layout size has stabilized before measuring canvas (prevents initial weird scaling)
+        const cssW = elPcaCanvas.clientWidth || 600;
+        if (cssW <= 1) {
+          requestAnimationFrame(renderPCA);
+          return;
+        }
+
+        const bIdx = Math.max(0, Number(elBidx.value) ||  0);
+        let Tvalid = validTFromIsLast(bIdx);
+        if (Tvalid == null) {
+          const Ls = Array.isArray(algo?.lengths) ? algo.lengths : null;
+          if (Ls && Ls.length > bIdx) {
+            const L = Number(Ls[bIdx]);
+            if (Number.isFinite(L) && L > 0) Tvalid = L;
+          }
+        }
+        if (Tvalid == null) {
+          try { Tvalid = hs[Math.min(bIdx, hs.length-1)].length; } catch(_) { Tvalid = 1; }
+        }
+
+        const tVectors = PCA.flattenBTNDToTimeVectors(hs, bIdx, Tvalid);
+        const T = tVectors.length;
+        if (T === 0){
+          elPcaContainer.style.display = 'none';
+          elPcaInfo.textContent = 'No timesteps to show.';
+          return;
+        }
+
+        const K = Math.min(10, T);
+        const pca = PCA.fit(tVectors, K);
+
+        const pcx = Math.max(1, Number(elPcx.value) || 1);
+        const pcy = Math.max(1, Number(elPcy.value) || 2);
+        const coords = PCA.projectXY(pca, pcx, pcy);
+
+        // Cache bounds based on all time points (NOT changing with current time)
+        const boundsKey = `b=${bIdx}|T=${T}|pcx=${pcx}|pcy=${pcy}`;
+        if (pcaBoundsCache.key !== boundsKey) {
+          pcaBoundsCache.bounds = computeBoundsFromPoints(coords);
+          pcaBoundsCache.key = boundsKey;
+        }
+        const bnd = pcaBoundsCache.bounds;
+        if (!bnd) {
+          elPcaContainer.style.display = 'none';
+          elPcaInfo.textContent = 'PCA produced invalid coordinates.';
+          return;
+        }
+        let { xmin, xmax, ymin, ymax } = bnd;
+
+        const dpr = window.devicePixelRatio || 1;
+        const cssH = elPcaCanvas.clientHeight || 320;
+        elPcaCanvas.width = Math.max(1, Math.floor(cssW * dpr));
+        elPcaCanvas.height = Math.max(1, Math.floor(cssH * dpr));
+        const ctx = elPcaCanvas.getContext('2d');
+        ctx.setTransform(dpr,0,0,dpr,0,0);
+        ctx.clearRect(0,0,cssW,cssH);
+
+        function sx(x){ return (x - xmin) / (xmax - xmin) * (cssW - 40) + 20; }
+        function sy(y){ return (1 - (y - ymin) / (ymax - ymin)) * (cssH - 48) + 16; }
+
+        ctx.strokeStyle = '#ddd';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(10.5, 10.5, cssW-21, cssH-33);
+        drawAxes(ctx, cssW, cssH, xmin, xmax, ymin, ymax);
+        drawAxisLines(ctx, cssW, cssH, sx, sy);
+
+        ctx.strokeStyle = '#4E79A7';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        let started=false;
+        for (let i=0;i<coords.length;i++){
+          const p = coords[i];
+          const X = sx(p.x), Y = sy(p.y);
+          if (!started){ ctx.moveTo(X,Y); started=true; }
+          else ctx.lineTo(X,Y);
+        }
+        ctx.stroke();
+
+        const curT = Math.max(0, Math.min(T-1, Number(elT.value) || 0));
+        for (let i=0;i<coords.length;i++){
+          const p = coords[i];
+          const X = sx(p.x), Y = sy(p.y);
+          ctx.beginPath();
+          ctx.arc(X, Y, (i===0 || i===T-1) ? 4 : 3, 0, Math.PI*2);
+          if (i === curT) {
+            ctx.fillStyle = '#E15759';
+            ctx.fill();
+          } else {
+            ctx.fillStyle = (i===0) ? '#59A14F' : (i===T-1 ? '#B07AA1' : '#4E79A7');
+            ctx.fill();
+          }
+        }
+
+        elPcaContainer.style.display = '';
+        const evx = pca.explained[Math.max(0, Math.min(pca.explained.length-1, pcx-1))] || 0;
+        const evy = pca.explained[Math.max(0, Math.min(pca.explained.length-1, pcy-1))] || 0;
+        elPcaInfo.textContent = `T=${T}, PCs available=${pca.K}. Var[X]=${(evx*100).toFixed(1)}%, Var[Y]=${(evy*100).toFixed(1)}%`;
+        elPcaTitle.textContent = `PCA trajectory • PC${pcx} vs PC${pcy}`;
+      } catch (e){
+        elPcaContainer.style.display = 'none';
+        elPcaInfo.textContent = `PCA error: ${e?.message || e}`;
+      }
+    }
+
+    function renderPCANodes_(){
+      try {
+        const hs = algo && algo.gnn_hidden_states && algo.gnn_hidden_states.data;
+        const hasHS = Array.isArray(hs) || (hs && typeof hs === 'object' && typeof hs.length === 'number');
+        if (!hasHS){
+          elShowPcaNodes.disabled = true;
+          elPcaNodesContainer.style.display = 'none';
+          elPcaNodesInfo.textContent = 'Hidden states not found in JSON.';
+          return;
+        } else {
+          elShowPcaNodes.disabled = false;
+        }
+        if (!elShowPcaNodes.checked){
+          elPcaNodesContainer.style.display = 'none';
+          return;
+        }
+
+        const cssW = elPcaNodesCanvas.clientWidth || 600;
+        if (cssW <= 1) {
+          requestAnimationFrame(renderPCANodes);
+          return;
+        }
+
+        const bIdx = Math.max(0, Number(elBidx.value) || 0);
+        let Tvalid = validTFromIsLast(bIdx);
+        if (Tvalid == null) {
+          const Ls = Array.isArray(algo?.lengths) ? algo.lengths : null;
+          if (Ls && Ls.length > bIdx) {
+            const L = Number(Ls[bIdx]);
+            if (Number.isFinite(L) && L > 0) Tvalid = L;
+          }
+        }
+        if (Tvalid == null) {
+          try { Tvalid = hs[Math.min(bIdx, hs.length-1)].length; } catch(_) { Tvalid = 1; }
+        }
+
+        const bt = hs[Math.min(bIdx, hs.length-1)] || [];
+        const first = bt[0] || [];
+        const N = Array.isArray(first) ? first.length : 0;
+        const firstND = (N>0) ? first[0] : [];
+        const D = Array.isArray(firstND) ? firstND.length : 1;
+
+        const algoName = algo && algo.algorithm ? String(algo.algorithm) : 'algo';
+        const cacheKey = `${algoName}|b=${bIdx}|T=${Tvalid}|N=${N}|D=${D}`;
+        if (nodePcaCache.key !== cacheKey){
+          let samples;
+          try {
+            samples = PCA.flattenBTNDToNodeSamples(hs, bIdx, Tvalid);
+          } catch(e){
+            elPcaNodesContainer.style.display = 'none';
+            elPcaNodesInfo.textContent = 'Failed to build node samples for PCA.';
+            return;
+          }
+          const K = Math.min(10, Math.min(D, samples.length));
+          try {
+            nodePcaCache.pca = PCA.fit(samples, K);
+            nodePcaCache.key = cacheKey;
+            // Also reset bounds cache when PCA basis changes (new batch / sizes)
+            pcaNodesBoundsCache.key = null;
+            pcaNodesBoundsCache.bounds = null;
+          } catch(e){
+            elPcaNodesContainer.style.display = 'none';
+            elPcaNodesInfo.textContent = 'PCA fitting failed.';
+            return;
+          }
+        }
+
+        const pca = nodePcaCache.pca;
+        if (!pca){
+          elPcaNodesContainer.style.display = 'none';
+          elPcaNodesInfo.textContent = 'PCA basis not available.';
+          return;
+        }
+
+        const pcx = Math.max(1, Number(elPcxNodes.value) || 1);
+        const pcy = Math.max(1, Number(elPcyNodes.value) || 2);
+
+        // Bounds are computed once from ALL nodes across ALL times (basis is already from all times)
+        const boundsKey = `b=${bIdx}|T=${Tvalid}|pcx=${pcx}|pcy=${pcy}|N=${N}|D=${D}`;
+        if (pcaNodesBoundsCache.key !== boundsKey) {
+          let samples;
+          try {
+            samples = PCA.flattenBTNDToNodeSamples(hs, bIdx, Tvalid);
+          } catch(_e) {
+            samples = null;
+          }
+          if (samples && samples.length) {
+            const allPts = PCA.projectPointsXY(pca, samples, pcx, pcy);
+            pcaNodesBoundsCache.bounds = computeBoundsFromPoints(allPts);
+            pcaNodesBoundsCache.key = boundsKey;
+          }
+        }
+        const bnd = pcaNodesBoundsCache.bounds;
+        if (!bnd) {
+          elPcaNodesContainer.style.display = 'none';
+          elPcaNodesInfo.textContent = 'PCA bounds not available.';
+          return;
+        }
+        let { xmin, xmax, ymin, ymax } = bnd;
+
+        const curT = Math.max(0, Math.min((Tvalid||1)-1, Number(elT.value) || 0));
+        const nodes = (bt && bt[curT]) ? bt[curT] : [];
+        const vectors = new Array(N);
+        for (let n=0;n<N;n++){
+          const h = nodes[n] || [];
+          const row = new Float64Array(D);
+          if (Array.isArray(h)){
+            for (let d=0; d<D; d++) row[d] = Number(h[d]) || 0;
+          } else {
+            row[0] = Number(h) || 0;
+          }
+          vectors[n] = row;
+        }
+
+        const pts = PCA.projectPointsXY(pca, vectors, pcx, pcy);
+
+        const dpr = window.devicePixelRatio || 1;
+        const cssH = elPcaNodesCanvas.clientHeight || 320;
+        elPcaNodesCanvas.width = Math.max(1, Math.floor(cssW * dpr));
+        elPcaNodesCanvas.height = Math.max(1, Math.floor(cssH * dpr));
+        const ctx = elPcaNodesCanvas.getContext('2d');
+        ctx.setTransform(dpr,0,0,dpr,0,0);
+        ctx.clearRect(0,0,cssW,cssH);
+
+        function sx(x){ return (x - xmin) / (xmax - xmin) * (cssW - 40) + 20; }
+        function sy(y){ return (1 - (y - ymin) / (ymax - ymin)) * (cssH - 48) + 16; }
+
+        ctx.strokeStyle = '#ddd';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(10.5, 10.5, cssW-21, cssH-33);
+        drawAxes(ctx, cssW, cssH, xmin, xmax, ymin, ymax);
+        drawAxisLines(ctx, cssW, cssH, sx, sy);
+
+        const colorByIndex = !!elColorGraphNodes?.checked;
+        for (let i=0;i<pts.length;i++){
+          const p = pts[i];
+          const X = sx(p.x), Y = sy(p.y);
+          ctx.beginPath();
+          ctx.arc(X, Y, 3, 0, Math.PI*2);
+          ctx.fillStyle = colorByIndex ? nodeIndexToColor(i, pts.length) : '#4E79A7';
+          ctx.fill();
+        }
+
+        elPcaNodesContainer.style.display = '';
+        const evx = pca.explained[Math.max(0, Math.min(pca.explained.length-1, pcx-1))] || 0;
+        const evy = pca.explained[Math.max(0, Math.min(pca.explained.length-1, pcy-1))] || 0;
+        elPcaNodesInfo.textContent = `N=${N}, T_basis=${Tvalid}, PCs available=${pca.K}. Var[X]=${(evx*100).toFixed(1)}%, Var[Y]=${(evy*100).toFixed(1)}%`;
+        elPcaNodesTitle.textContent = `PCA (nodes) • PC${pcx} vs PC${pcy}`;
+      } catch (_e){
+        elPcaNodesContainer.style.display = 'none';
+        elPcaNodesInfo.textContent = 'Error rendering node-wise PCA.';
+      }
+    }
+
+    // DEBUG (temporary): help diagnose missing pi_h corr plot
+    // Logs once per render when corr is enabled for pi_h.
+    function _dbgCorrRender(name, probe, tIdx, bIdx, card){
+      try{
+        if (name !== 'pi_h') return;
+        if (!probe || !probe.correctness_along_time) return;
+        const s = probe.correctness_along_time;
+        const is2D = Array.isArray(s) && s.length>0 && Array.isArray(s[0]);
+        const len1 = Array.isArray(s) ? s.length : null;
+        const len2 = is2D ? (Array.isArray(s[0]) ? s[0].length : null) : null;
+        const wrapDisp = card && card._corrWrap ? card._corrWrap.style.display : '<no wrap>';
+        const canDisp = card && card._corrCanvas ? card._corrCanvas.style.display : '<no canvas>';
+        console.log('[viz][corr] pi_h render', {stage: probe.stage, tIdx, bIdx, is2D, len1, len2, wrapDisp, canDisp});
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    // events
+    btnPlay.addEventListener('click', play);
+    btnPause.addEventListener('click', stop);
+    btnStepBack?.addEventListener('click', () => stepTime(-1));
+    btnStepForward?.addEventListener('click', () => stepTime(+1));
+    btnAll.addEventListener('click', () => setAllProbes(true));
+    btnNone.addEventListener('click', () => setAllProbes(false));
+
+    elT.addEventListener('input', () => { detectAndRender(); });
+    elBidx.addEventListener('change', () => { stop(); scaleCache.clear(); pcaBoundsCache.key=null; pcaBoundsCache.bounds=null; pcaNodesBoundsCache.key=null; pcaNodesBoundsCache.bounds=null; detectAndRender(); });
+    // PCA controls events
+    if (HAS_PCA_UI) {
+      elShowPca.addEventListener('change', () => { detectAndRender(); });
+      elPcx.addEventListener('change', () => { pcaBoundsCache.key=null; pcaBoundsCache.bounds=null; detectAndRender(); });
+      elPcy.addEventListener('change', () => { pcaBoundsCache.key=null; pcaBoundsCache.bounds=null; detectAndRender(); });
+
+      elShowPcaNodes.addEventListener('change', () => { detectAndRender(); });
+      elPcxNodes.addEventListener('change', () => { pcaNodesBoundsCache.key=null; pcaNodesBoundsCache.bounds=null; detectAndRender(); });
+      elPcyNodes.addEventListener('change', () => { pcaNodesBoundsCache.key=null; pcaNodesBoundsCache.bounds=null; detectAndRender(); });
+
+      if (elColorGraphNodes) {
+        elColorGraphNodes.addEventListener('change', () => { detectAndRender(); });
+      }
+    }
+
+    elVCell.addEventListener('change', detectAndRender);
+    elMCell.addEventListener('change', detectAndRender);
+    elR0.addEventListener('input', detectAndRender);
+    elR1.addEventListener('input', detectAndRender);
+    elC0.addEventListener('input', detectAndRender);
+    elC1.addEventListener('input', detectAndRender);
+
+    elContrast.addEventListener('input', detectAndRender);
+    elFps.addEventListener('change', () => { if (timer) play(); });
+
+    elLockScale.addEventListener('change', () => { scaleCache.clear(); detectAndRender(); });
+
+    window.addEventListener('resize', () => { detectAndRender(); });
+
+    elFile.addEventListener('change', async () => {
+      stop();
+      const f = elFile.files?.[0];
+      if (!f) return;
+      const text = await f.text();
+      let parsed = null;
+      try { parsed = JSON.parse(text); } catch (_e) { alert('Invalid JSON'); return; }
+
+      if (!(parsed && parsed.probes && typeof parsed.probes === 'object')) {
+        alert('Expected multi-probe JSON: { "algorithm": "...", "probes": { ... }, "is_last": [[...]] }');
+        return;
+      }
+
+      algo = parsed;
+
+      selectedState.clear();
+      scaleCache.clear();
+
+      elT.value = "0";
+      elBidx.value = "0";
+      setHoverText("Hover any cell to see its value here.");
+
+      detectAndRender();
+    });
   }
 
   window.CLRSViewer = window.CLRSViewer || {};
