@@ -73,6 +73,26 @@ def _sigmoid(x: np.ndarray) -> np.ndarray:
   return 1.0 / (1.0 + np.exp(-x))
 
 
+def _looks_like_probabilities(x: np.ndarray) -> bool:
+  """Heuristic: does x already look like probabilities in [0,1]?
+
+  Used to avoid applying sigmoid to already-decoded MASK outputs.
+  """
+  try:
+    if x.size == 0:
+      return False
+    a = np.asarray(x)
+    if not np.issubdtype(a.dtype, np.number):
+      return False
+    amin = float(np.nanmin(a))
+    amax = float(np.nanmax(a))
+    if not np.isfinite(amin) or not np.isfinite(amax):
+      return False
+    return (amin >= 0.0) and (amax <= 1.0)
+  except Exception:
+    return False
+
+
 def _looks_like_indices(x: np.ndarray) -> bool:
   """Heuristic: does x look like integer indices stored as float?
 
@@ -244,7 +264,12 @@ def extract_probe(
 
   if postprocess != "none":
     if ttype == specs.Type.MASK:
-      pred_bt = _sigmoid(pred_bt)
+     
+      # Sigmoid should only be applied to logits (unbounded real values).
+      if _looks_like_probabilities(pred_bt):
+        logging.info("[viz] %s: skipping sigmoid (pred looks like probabilities)", probe_name)
+      else:
+        pred_bt = _sigmoid(pred_bt)
     elif ttype in (specs.Type.MASK_ONE, specs.Type.CATEGORICAL, specs.Type.POINTER):
       # Important: OUTPUT preds are often already decoded (indices) or probabilities.
       # Applying softmax blindly can collapse index-like tensors to ~0 everywhere.
@@ -592,6 +617,46 @@ def extract_all_probes(
       if T_eval is None:
         T_eval = 1
 
+      def _scalar_mse_to_correctness(mse: float, truth_step: np.ndarray) -> float:
+        """Map scalar MSE (0=perfect) to a [0,1] correctness score (1=perfect)."""
+        try:
+          t = np.asarray(truth_step, dtype=np.float32)
+          if t.size == 0:
+            return 0.0
+          # Robust scale proxy: RMS of truth (avoid division by near-zero).
+          rms = float(np.sqrt(np.mean(t * t)))
+          scale = max(rms, 1e-6)
+          return float(1.0 / (1.0 + (float(mse) / (scale * scale))))
+        except Exception:
+          # Fallback: still monotonic but scale-free.
+          return float(1.0 / (1.0 + float(mse)))
+
+      def _scalar_mse_to_correctness_global(mse: float, *, scale_sq: float) -> float:
+        """Map scalar MSE to [0,1] using a fixed global scale (1=perfect)."""
+        try:
+          denom = float(max(scale_sq, 1e-12))
+          return float(1.0 / (1.0 + (float(mse) / denom)))
+        except Exception:
+          return float(1.0 / (1.0 + float(mse)))
+
+      def _scalar_global_scale_sq(truth_full: np.ndarray) -> float:
+        """Compute a per-hint global scale^2 from truth over time.
+
+        Uses RMS over all non-time dims and across timesteps 1..T-1 (since idx=0
+        isn't evaluated by CLRS for hints).
+        """
+        try:
+          tf = np.asarray(truth_full, dtype=np.float32)
+          if tf.size == 0:
+            return 1.0
+          if tf.ndim >= 1 and tf.shape[0] > 1:
+            tf = tf[1:]
+          # RMS^2 == mean(x^2)
+          scale_sq = float(np.mean(tf * tf))
+          return max(scale_sq, 1e-12)
+        except Exception:
+          return 1.0
+
       # Align prediction representation to match truth representation for evaluation.
       def _align_pred_to_truth(truth: probing.DataPoint, pred: probing.DataPoint) -> probing.DataPoint:
         t = truth.type_
@@ -661,9 +726,21 @@ def extract_all_probes(
           raw_seq_any: List[Any] = list(raw_seq)
           raw_seq_any = _pad_pred_seq_to_T(raw_seq_any, T=int(T_eval))
 
+          # IMPORTANT: evaluation.evaluate_hints compares pred at list index i
+          # against truth[idx=i+1]. That means hint_preds must correspond to
+          # algorithm steps 1..T-1 (no explicit timestep-0 prediction).
+          #
+          # Our visualizer alignment pads a timestep-0 prediction to make the
+          # exported arrays [B,T,...] line up for rendering. For correctness,
+          # we must drop that padded step to avoid an off-by-one shift.
+          if len(raw_seq_any) == int(T_eval):
+            eval_raw_seq_any = raw_seq_any[1:]
+          else:
+            eval_raw_seq_any = raw_seq_any
+
           one_hint_preds: List[Dict[str, probing.DataPoint]] = []
-          for t in range(int(T_eval)):
-            dp_pred = raw_seq_any[t]
+          for t in range(len(eval_raw_seq_any)):
+            dp_pred = eval_raw_seq_any[t]
             if not isinstance(dp_pred, probing.DataPoint):
               dp_pred = probing.DataPoint(
                   name=name,
@@ -676,10 +753,25 @@ def extract_all_probes(
           evals = evaluation.evaluate_hints((truth,), lengths_arr, one_hint_preds)
           key = name + '_along_time'
           if key in evals and name in probes and isinstance(probes[name], dict) and 'error' not in probes[name]:
-            try:
-              probes[name]['correctness_along_time'] = _to_numpy(evals[key]).astype(np.float32).tolist()
-            except Exception:
-              probes[name]['correctness_along_time'] = _to_numpy(evals[key]).tolist()
+            series = _to_numpy(evals[key]).astype(np.float32)
+
+            if truth.type_ == specs.Type.SCALAR:
+              # Convert per-step MSE to a [0,1] correctness curve.
+              truth_full = _to_numpy(truth.data)
+              global_scale_sq = _scalar_global_scale_sq(truth_full)
+              corr: List[float] = []
+              for i in range(int(series.shape[0])):
+                corr.append(_scalar_mse_to_correctness_global(float(series[i]), scale_sq=global_scale_sq))
+              # Pad to length T_eval for the viewer (t=0 has no eval by design).
+              if int(T_eval) == int(series.shape[0]) + 1:
+                corr = [corr[0] if corr else 0.0] + corr
+              probes[name]['correctness_along_time'] = corr
+            else:
+              # Pad to length T_eval for the viewer (t=0 has no eval by design).
+              out_series = series.tolist()
+              if int(T_eval) == int(series.shape[0]) + 1:
+                out_series = [out_series[0] if out_series else 0.0] + out_series
+              probes[name]['correctness_along_time'] = out_series
         except Exception as e_one:
           logging.info('[viz] Hint correctness skipped for %s due to evaluation error: %s', name, e_one)
   except Exception as e:

@@ -266,6 +266,19 @@
       return `rgb(${g},${g},${g})`;
     }
 
+    // Scalar-only color: white (0) -> blue (1). Used ONLY for probes with type===SCALAR.
+    function probToBlue(p, contrast=1.0) {
+      p = clamp01((p - 0.5) * contrast + 0.5);
+      // White -> Blue: keep R,G fixed at 255*(1-p), B stays 255.
+      const rg = Math.round(255 * (1 - p));
+      return `rgb(${rg},${rg},255)`;
+    }
+
+    function isScalarType(typeStr) {
+      if (!typeStr) return false;
+      return String(typeStr).toLowerCase() === 'scalar';
+    }
+
     // --- correctness graph helpers ---
     function hasCorrectnessSeries(p){
       if (!p || String(p.stage||'').toUpperCase()!=='HINT') return false;
@@ -822,7 +835,7 @@
       return {bothIn01:true,min:0,max:1};
     }
 
-    function drawVectorTo(ctx, canvas, raw, scale, cell, contrast) {
+    function drawVectorTo(ctx, canvas, raw, scale, cell, contrast, colorFn = probToGray) {
       const N = raw.length;
       canvas.width = Math.max(1, N * cell);
       canvas.height = Math.max(1, cell);
@@ -835,7 +848,7 @@
       for (let j=0;j<N;j++){
         const val=raw[j];
         const p = (bothIn01 ? val : ((val - gmin) / gden));
-        ctx.fillStyle = probToGray(p, contrast);
+        ctx.fillStyle = colorFn(p, contrast);
         ctx.fillRect(j*cell, 0, cell, cell);
       }
       ctx.strokeStyle='rgba(0,0,0,0.10)';
@@ -845,7 +858,7 @@
       ctx.beginPath(); ctx.moveTo(0,cell+0.5); ctx.lineTo(N*cell,cell+0.5); ctx.stroke();
     }
 
-    function drawMatrixTo(ctx, canvas, H, W, getVal, scale, cell, contrast) {
+    function drawMatrixTo(ctx, canvas, H, W, getVal, scale, cell, contrast, colorFn = probToGray) {
       canvas.width = Math.max(1, W * cell);
       canvas.height = Math.max(1, H * cell);
       ctx.clearRect(0,0,canvas.width,canvas.height);
@@ -858,7 +871,7 @@
         for (let j=0;j<W;j++){
           const v = Number(getVal(i,j));
           const p = (bothIn01 ? v : ((v - gmin) / gden));
-          ctx.fillStyle = probToGray(p, contrast);
+          ctx.fillStyle = colorFn(p, contrast);
           ctx.fillRect(j*cell, i*cell, cell, cell);
         }
       }
@@ -1319,6 +1332,8 @@
         card._sPred.textContent = `shape=${JSON.stringify(getDims(probe.pred))}`;
         const typeStr = String(probe.type || '').toLowerCase();
         const isCat = isCategoricalType(probe.type);
+        const isScalar = typeStr === 'scalar';
+        const colorFn = isScalar ? probToBlue : probToGray;
         card._sErr.textContent  = isCat ? 'mismatch' : '|pred-true|';
 
         // correctness plot (same logic)
@@ -1340,9 +1355,18 @@
           const tv = Number(Array.isArray(frameT) ? frameT[0] : frameT);
           const pv = Number(Array.isArray(frameP) ? frameP[0] : frameP);
           const scale = {bothIn01:true,min:0,max:1};
-          drawMatrixTo(card._cTrue.getContext('2d'), card._cTrue, 1, 1, ()=>Number.isFinite(tv)?tv:0, scale, 40, contrast);
-          drawMatrixTo(card._cPred.getContext('2d'), card._cPred, 1, 1, ()=>Number.isFinite(pv)?pv:0, scale, 40, contrast);
-          drawMatrixTo(card._cErr.getContext('2d'),  card._cErr,  1, 1, ()=>Math.abs((Number.isFinite(pv)?pv:0)-(Number.isFinite(tv)?tv:0)), {bothIn01:true,min:0,max:1}, 40, contrast);
+          const tvSafe = Number.isFinite(tv) ? tv : 0;
+          const pvSafe = Number.isFinite(pv) ? pv : 0;
+          const evSafe = Math.abs(pvSafe - tvSafe);
+
+          drawMatrixTo(card._cTrue.getContext('2d'), card._cTrue, 1, 1, ()=>tvSafe, scale, 40, contrast, colorFn);
+          drawMatrixTo(card._cPred.getContext('2d'), card._cPred, 1, 1, ()=>pvSafe, scale, 40, contrast, colorFn);
+          drawMatrixTo(card._cErr.getContext('2d'),  card._cErr,  1, 1, ()=>evSafe, {bothIn01:true,min:0,max:1}, 40, contrast, colorFn);
+
+          // Hover support for fallback scalar rendering
+          card._cTrue._hoverGetter = ()=>({type:'matrix',which:'true',t:tIdx,H:1,W:1,cell:40,get:()=>tvSafe});
+          card._cPred._hoverGetter = ()=>({type:'matrix',which:'pred',t:tIdx,H:1,W:1,cell:40,get:()=>pvSafe});
+          card._cErr._hoverGetter  = ()=>({type:'matrix',which:'err', t:tIdx,H:1,W:1,cell:40,get:()=>evSafe});
           continue;
         }
 
@@ -1362,9 +1386,9 @@
         }
 
         const scale = {bothIn01:false,min:Math.min(tv,pv),max:Math.max(tv,pv)};
-        drawVectorTo(card._cTrue.getContext('2d'), card._cTrue, rawTrue, scale, 60, contrast);
-        drawVectorTo(card._cPred.getContext('2d'), card._cPred, rawPred, scale, 60, contrast);
-        drawVectorTo(card._cErr.getContext('2d'),  card._cErr,  rawErr,  {bothIn01:true,min:0,max:1}, 60, contrast);
+        drawVectorTo(card._cTrue.getContext('2d'), card._cTrue, rawTrue, scale, 60, contrast, colorFn);
+        drawVectorTo(card._cPred.getContext('2d'), card._cPred, rawPred, scale, 60, contrast, colorFn);
+        drawVectorTo(card._cErr.getContext('2d'),  card._cErr,  rawErr,  {bothIn01:true,min:0,max:1}, 60, contrast, colorFn);
 
         card._cTrue._hoverGetter = ()=>({type:'vector',which:'true',t:tIdx,N:1,cell:60,get:()=>tv});
         card._cPred._hoverGetter = ()=>({type:'vector',which:'pred',t:tIdx,N:1,cell:60,get:()=>pv});
@@ -1469,9 +1493,10 @@
           const fT = flattenFrameTo2D(frameT);
           const fP = flattenFrameTo2D(frameP);
           const scale = {bothIn01:true,min:0,max:1};
-          drawMatrixTo(card._cTrue.getContext('2d'), card._cTrue, fT.H, fT.W, (i,j)=>fT.get(i,j), scale, mcell, contrast);
-          drawMatrixTo(card._cPred.getContext('2d'), card._cPred, fP.H, fP.W, (i,j)=>fP.get(i,j), scale, mcell, contrast);
-          drawMatrixTo(card._cErr.getContext('2d'),  card._cErr,  fT.H, fT.W, (i,j)=>Math.abs(fP.get(i,j)-fT.get(i,j)), {bothIn01:true,min:0,max:1}, mcell, contrast);
+          const colorFn = isScalarType(probe.type) ? probToBlue : probToGray;
+          drawMatrixTo(card._cTrue.getContext('2d'), card._cTrue, fT.H, fT.W, (i,j)=>fT.get(i,j), scale, mcell, contrast, colorFn);
+          drawMatrixTo(card._cPred.getContext('2d'), card._cPred, fP.H, fP.W, (i,j)=>fP.get(i,j), scale, mcell, contrast, colorFn);
+          drawMatrixTo(card._cErr.getContext('2d'),  card._cErr,  fT.H, fT.W, (i,j)=>Math.abs(fP.get(i,j)-fT.get(i,j)), {bothIn01:true,min:0,max:1}, mcell, contrast, colorFn);
           continue;
         }
 
@@ -1493,17 +1518,16 @@
           scale = bothIn01 ? {bothIn01:true,min:0,max:1} : {bothIn01:false,min:Math.min(tmin,pmin),max:Math.max(tmax,pmax)};
         }
 
-        drawVectorTo(card._cTrue.getContext('2d'), card._cTrue, rawTrue, scale, vcell, contrast);
-        drawVectorTo(card._cPred.getContext('2d'), card._cPred, rawPred, scale, vcell, contrast);
+        const colorFn = isScalarType(probe.type) ? probToBlue : probToGray;
+        drawVectorTo(card._cTrue.getContext('2d'), card._cTrue, rawTrue, scale, vcell, contrast, colorFn);
+        drawVectorTo(card._cPred.getContext('2d'), card._cPred, rawPred, scale, vcell, contrast, colorFn);
 
         const errLocked = getErrScaleFor(name, probe, lengths);
         const typeStr = String(probe.type || '').toLowerCase();
         const isPointer = (typeStr === 'pointer');
         const isMaskOne = (typeStr === 'mask_one');
 
-        // For POINTER/MASK_ONE vectors, use discrete mismatch.
-        // - POINTER: decode both sides to integer labels (round if index-like, else argmax if ever provided as a vector).
-        // - MASK_ONE: if values are in [0,1] treat as probability and threshold at 0.5.
+        // Preserve discrete mismatch behavior for POINTER/MASK_ONE vectors.
         let rawErr;
         if (isPointer) {
           rawErr = rawPred.map((v,idx)=>{
@@ -1531,7 +1555,8 @@
           const emax = Math.max(...rawErr, 0);
           errScale = (emax <= 1) ? {bothIn01:true,min:0,max:1} : {bothIn01:false,min:0,max:Math.max(emax,1e-6)};
         }
-        drawVectorTo(card._cErr.getContext('2d'), card._cErr, rawErr, errScale, vcell, contrast);
+
+        drawVectorTo(card._cErr.getContext('2d'), card._cErr, rawErr, errScale, vcell, contrast, colorFn);
 
         card._cTrue._hoverGetter = ()=>({type:'vector',which:'true',t:tIdx,N,cell:vcell,get:(j)=>rawTrue[j]});
         card._cPred._hoverGetter = ()=>({type:'vector',which:'pred',t:tIdx,N,cell:vcell,get:(j)=>rawPred[j]});
@@ -1659,9 +1684,10 @@
           const fT = flattenFrameTo2D(frameT);
           const fP = flattenFrameTo2D(frameP);
           const scale = {bothIn01:true,min:0,max:1};
-          drawMatrixTo(card._cTrue.getContext('2d'), card._cTrue, fT.H, fT.W, (i,j)=>fT.get(i,j), scale, mcell, contrast);
-          drawMatrixTo(card._cPred.getContext('2d'), card._cPred, fP.H, fP.W, (i,j)=>fP.get(i,j), scale, mcell, contrast);
-          drawMatrixTo(card._cErr.getContext('2d'),  card._cErr,  fT.H, fT.W, (i,j)=>Math.abs(fP.get(i,j)-fT.get(i,j)), {bothIn01:true,min:0,max:1}, mcell, contrast);
+          const colorFn = isScalarType(probe.type) ? probToBlue : probToGray;
+          drawMatrixTo(card._cTrue.getContext('2d'), card._cTrue, fT.H, fT.W, (i,j)=>fT.get(i,j), scale, mcell, contrast, colorFn);
+          drawMatrixTo(card._cPred.getContext('2d'), card._cPred, fP.H, fP.W, (i,j)=>fP.get(i,j), scale, mcell, contrast, colorFn);
+          drawMatrixTo(card._cErr.getContext('2d'),  card._cErr,  fT.H, fT.W, (i,j)=>Math.abs(fP.get(i,j)-fT.get(i,j)), {bothIn01:true,min:0,max:1}, mcell, contrast, colorFn);
           continue;
         }
 
@@ -1693,8 +1719,9 @@
           scale = bothIn01 ? {bothIn01:true,min:0,max:1} : {bothIn01:false,min:Math.min(tmin,pmin),max:Math.max(tmax,pmax)};
         }
 
-        drawMatrixTo(card._cTrue.getContext('2d'), card._cTrue, HH, WW, (i,j)=>mTrue.get(t0,r0+i,c0+j), scale, mcell, contrast);
-        drawMatrixTo(card._cPred.getContext('2d'), card._cPred, HH, WW, (i,j)=>mPred.get(t0,r0+i,c0+j), scale, mcell, contrast);
+        const colorFn = isScalarType(probe.type) ? probToBlue : probToGray;
+        drawMatrixTo(card._cTrue.getContext('2d'), card._cTrue, HH, WW, (i,j)=>mTrue.get(t0,r0+i,c0+j), scale, mcell, contrast, colorFn);
+        drawMatrixTo(card._cPred.getContext('2d'), card._cPred, HH, WW, (i,j)=>mPred.get(t0,r0+i,c0+j), scale, mcell, contrast, colorFn);
 
         const errLocked = getErrScaleFor(name, probe, lengths);
         let errScale = {bothIn01:true,min:0,max:1};
@@ -1725,7 +1752,7 @@
             const lp = looksLikeIndexScalar(pv) ? Math.round(pv) : Math.round(pv);
             return (lt === lp) ? 0 : 1;
           };
-          drawMatrixTo(card._cErr.getContext('2d'),  card._cErr,  HH, WW, errGetter, {bothIn01:true,min:0,max:1}, mcell, contrast);
+          drawMatrixTo(card._cErr.getContext('2d'),  card._cErr,  HH, WW, errGetter, {bothIn01:true,min:0,max:1}, mcell, contrast, colorFn);
           card._cErr._hoverGetter  = ()=>({type:'matrix',which:'err', t:t0,H:HH,W:WW,cell:mcell,get:(i,j)=>errGetter(i,j)});
           card._cTrue._hoverGetter = ()=>({type:'matrix',which:'true',t:t0,H:HH,W:WW,cell:mcell,get:(i,j)=>Number(mTrue.get(t0,r0+i,c0+j))});
           card._cPred._hoverGetter = ()=>({type:'matrix',which:'pred',t:t0,H:HH,W:WW,cell:mcell,get:(i,j)=>Number(mPred.get(t0,r0+i,c0+j))});
@@ -1742,19 +1769,20 @@
             const lp = decodeBinaryMask(pv);
             return (lt === lp) ? 0 : 1;
           };
-          drawMatrixTo(card._cErr.getContext('2d'),  card._cErr,  HH, WW, errGetter, {bothIn01:true,min:0,max:1}, mcell, contrast);
+          drawMatrixTo(card._cErr.getContext('2d'),  card._cErr,  HH, WW, errGetter, {bothIn01:true,min:0,max:1}, mcell, contrast, colorFn);
           card._cErr._hoverGetter  = ()=>({type:'matrix',which:'err', t:t0,H:HH,W:WW,cell:mcell,get:(i,j)=>errGetter(i,j)});
           card._cTrue._hoverGetter = ()=>({type:'matrix',which:'true',t:t0,H:HH,W:WW,cell:mcell,get:(i,j)=>Number(mTrue.get(t0,r0+i,c0+j))});
           card._cPred._hoverGetter = ()=>({type:'matrix',which:'pred',t:t0,H:HH,W:WW,cell:mcell,get:(i,j)=>Number(mPred.get(t0,r0+i,c0+j))});
           continue;
         }
 
-        // Default numeric error
-        drawMatrixTo(card._cErr.getContext('2d'),  card._cErr,  HH, WW, (i,j)=>Math.abs(Number(mPred.get(t0,r0+i,c0+j)) - Number(mTrue.get(t0,r0+i,c0+j))), errScale, mcell, contrast);
-
+        // Default numeric error: |pred-true|
+        drawMatrixTo(card._cErr.getContext('2d'),  card._cErr,  HH, WW,
+          (i,j)=>Math.abs(Number(mPred.get(t0,r0+i,c0+j)) - Number(mTrue.get(t0,r0+i,c0+j))),
+          errScale, mcell, contrast, colorFn);
+        card._cErr._hoverGetter  = ()=>({type:'matrix',which:'err', t:t0,H:HH,W:WW,cell:mcell,get:(i,j)=>Math.abs(Number(mPred.get(t0,r0+i,c0+j)) - Number(mTrue.get(t0,r0+i,c0+j)))});
         card._cTrue._hoverGetter = ()=>({type:'matrix',which:'true',t:t0,H:HH,W:WW,cell:mcell,get:(i,j)=>Number(mTrue.get(t0,r0+i,c0+j))});
         card._cPred._hoverGetter = ()=>({type:'matrix',which:'pred',t:t0,H:HH,W:WW,cell:mcell,get:(i,j)=>Number(mPred.get(t0,r0+i,c0+j))});
-        card._cErr._hoverGetter  = ()=>({type:'matrix',which:'err', t:t0,H:HH,W:WW,cell:mcell,get:(i,j)=>Math.abs(Number(mPred.get(t0,r0+i,c0+j)) - Number(mTrue.get(t0,r0+i,c0+j)))});
       }
 
       elSummary.textContent = `selected=${selectedNames.length} • vectors=${vectorNames.length} • matrices=${matrixNames.length}`;
