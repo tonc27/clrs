@@ -414,6 +414,30 @@
       ctx.fillText(showB ? `b=${(bIdx|0)} t<=${tIdx}` : `t<=${tIdx}`, x1-110, cssH-6);
     }
 
+    function getProbeDataShape(probe, which /* 'true' | 'pred' */) {
+      // Prefer JSON metadata if available (your exporter already sets probe.shape + probe.axes).
+      const fullShape = Array.isArray(probe?.shape) ? probe.shape.slice() : getDims(probe?.[which]);
+
+      // If axes starts with B,T then drop them; else try the common [B,T,...] case.
+      const axes = Array.isArray(probe?.axes) ? probe.axes : null;
+
+      if (Array.isArray(fullShape) && fullShape.length >= 2) {
+        if (axes && axes.length >= 2 && String(axes[0]).toUpperCase() === 'B' && String(axes[1]).toUpperCase() === 'T') {
+          return fullShape.slice(2);
+        }
+        // Fallback heuristic: your tensors are almost always batch-first, time-second.
+        return fullShape.slice(2);
+      }
+
+      return fullShape;
+    }
+
+    function formatShapeList(shapeArr) {
+      if (!Array.isArray(shapeArr) || shapeArr.length === 0) return '[]';
+      return `[${shapeArr.join(', ')}]`;
+    }
+
+
     function getDims(arr) {
       const dims = [];
       let cur = arr;
@@ -1335,8 +1359,9 @@
         const card = buildCard(name, probe, true);
         elCardsContainer.appendChild(card);
 
-        card._sTrue.textContent = `shape=${JSON.stringify(getDims(probe.true))}`;
-        card._sPred.textContent = `shape=${JSON.stringify(getDims(probe.pred))}`;
+        card._sTrue.textContent = `shape=${formatShapeList(getProbeDataShape(probe, 'true'))}`;
+        card._sPred.textContent = `shape=${formatShapeList(getProbeDataShape(probe, 'pred'))}`;
+
         const typeStr = String(probe.type || '').toLowerCase();
         const isCat = isCategoricalType(probe.type);
         const isScalar = typeStr === 'scalar';
@@ -1410,8 +1435,8 @@
         const card = buildCard(name, probe, true);
         elCardsContainer.appendChild(card);
 
-        card._sTrue.textContent = `shape=${JSON.stringify(getDims(probe.true))}`;
-        card._sPred.textContent = `shape=${JSON.stringify(getDims(probe.pred))}`;
+        card._sTrue.textContent = `shape=${formatShapeList(getProbeDataShape(probe, 'true'))}`;
+        card._sPred.textContent = `shape=${formatShapeList(getProbeDataShape(probe, 'pred'))}`;
         card._sErr.textContent  = `|pred-true|`;
 
         // --- Hint correctness graph (optional; render early so no branch can skip it) ---
@@ -1580,8 +1605,8 @@
         const card = buildCard(name, probe, false);
         elCardsContainer.appendChild(card);
 
-        card._sTrue.textContent = `shape=${JSON.stringify(getDims(probe.true))}`;
-        card._sPred.textContent = `shape=${JSON.stringify(getDims(probe.pred))}`;
+        card._sTrue.textContent = `shape=${formatShapeList(getProbeDataShape(probe, 'true'))}`;
+        card._sPred.textContent = `shape=${formatShapeList(getProbeDataShape(probe, 'pred'))}`;
         card._sErr.textContent  = `|pred-true|`;
 
         // --- Hint correctness graph (optional; render early so no branch can skip it) ---
